@@ -1,3 +1,4 @@
 slimerjs
 phantomjs
 .DS_Store
+node_modules

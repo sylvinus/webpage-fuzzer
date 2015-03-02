@@ -8,21 +8,37 @@ if (system.args.length === 1) {
 
 var START_URL = system.args[2];
 var TIMEOUT = parseInt(system.args[1], 10);
+var MAX_DELAY_BETWEEN_EVENTS = 100;
+
+var getDomain = function(url) {
+  var matches = url.match(/^https?\:\/\/([^\/?#]+)(?:[\/?#]|$)/i);
+  var domain = matches && matches[1];
+  if (domain) {
+    domain = domain.replace(/^www\./, "");
+  }
+  return domain;
+};
 
 var randomPick = function(array) {
   return array[Math.floor(Math.random() * array.length)];
-}
+};
+
+var nextSetTimeout;
+
+var nextRandom = function() {
+  nextSetTimeout = setTimeout(doSomethingRandom, Math.random() * MAX_DELAY_BETWEEN_EVENTS);
+};
 
 var doSomethingRandom = function() {
 
-    // http://phantomjs.org/api/webpage/method/send-event.html
+    if (!page.url) return nextRandom();
 
     var fuzzEvent = [];
 
     // Mouse
     if (Math.random() < 0.9) {
       var mouseEvents = ["click"]; //"mouseup", "mousedown", "mousemove", "doubleclick"];
-      var mouseButtons = ["left", "left", "left", "left", "left", "left", "right"] // middle?
+      var mouseButtons = ["left", "left", "left", "left", "left", "left", "middle", "right"]
 
       var contentSize = page.evaluate(function() {
         var b = window.document.body || {};
@@ -50,25 +66,36 @@ var doSomethingRandom = function() {
       fuzzEvent = ['keypress', page.event.key[randomPick(keys)]];
     }
     // TODO scroll
+    // TODO drag n drop (mousedown, mousemove, mouseup)
+    // TODO mouse move & mouse position
 
     console.log("Sending event " + JSON.stringify(fuzzEvent));
 
-    setTimeout(doSomethingRandom, Math.random() * 100);
+    nextRandom();
 
     // TODO remove this
     page.evaluate(function() {
       window.event = {};
     });
+
+    // http://phantomjs.org/api/webpage/method/send-event.html
     page.sendEvent.apply(this, fuzzEvent);
 
 };
 
+var DOMAIN = getDomain(START_URL);
+var lastUrl = START_URL;
+
 var loadUrl = function(url) {
+
   console.log("Opening "+url);
-  page.viewportSize = {width:1200, height:1000};
+
+  page.viewportSize = {width:1440, height:1000};
+  page.settings.userAgent = "Webpage-Fuzzer/1.0 (+https://github.com/sylvinus/webpage-fuzzer)";
+
   page.open(url, function(status) {
     if (status !== 'success') {
-      console.log('FAIL to load the address');
+      console.log('Failed to load the page');
       phantom.exit(1);
     } else {
       doSomethingRandom();
@@ -84,21 +111,50 @@ setTimeout(function() {
 
 // Exit NOK as soon as we stumble upon a JS error
 page.onError = function(msg, trace) {
-  var msgStack = ['PHANTOM ERROR: ' + msg];
+  var msgStack = ['JavaScript error on page ' + lastUrl, msg];
   if (trace && trace.length) {
     msgStack.push('TRACE:');
     trace.forEach(function(t) {
       msgStack.push(' -> ' + (t.file || t.sourceURL) + ': ' + t.line + (t.function ? ' (in function ' + t.function +')' : ''));
     });
   }
-  console.error(msgStack.join('\n'));
+  var msgStr = msgStack.join('\n')
+  console.error(msgStr);
+
+  // Whitelisted errors
+  if (
+    msgStr.match(/window\.event/)
+    ||
+    msgStr.match(/s\.ytimg\.com/)
+    ||
+    msgStr.match(/static\.tumblr\.com/)
+  ) {
+    return;
+  }
+
   phantom.exit(1);
 };
 
-// TODO lock domain
-// http://phantomjs.org/api/webpage/handler/on-navigation-requested.html
+// Locks navigation to the domain of the first URL
 page.onUrlChanged = function(targetUrl) {
-    console.log('New URL: ' + targetUrl);
+  if (getDomain(targetUrl) != DOMAIN) {
+    console.log('Tried to load external URL: ' + targetUrl);
+    return page.goBack();
+
+    // TODO should we do this to avoid sending any event to external urls?
+    // Also research onNavigationRequested()
+    // clearTimeout(nextSetTimeout);
+    // return loadUrl(lastUrl);
+  }
+  console.log('New URL: ' + targetUrl);
+  lastUrl = targetUrl;
+};
+
+// Print HTTP errors
+page.onResourceReceived = function(response) {
+  if (response.status >= 400) {
+    console.log('Response (#' + response.id + ' HTTP ' + response.status + ', stage "' + response.stage + '"): ' + JSON.stringify(response));
+  }
 };
 
 // Load the starting URL & start fuzzing
